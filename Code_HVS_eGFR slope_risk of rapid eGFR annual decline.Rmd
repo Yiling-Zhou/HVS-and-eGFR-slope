@@ -1,0 +1,1113 @@
+---
+title: "R Notebook for individual eGFR slope vs HVS groups"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+# load cran ---
+```{r}
+library(pacman)
+p_load(readxl,plyr,writexl,dplyr,tidyr,ggplot2,stringr,lubridate,purrr,tidyverse,rms,interactions, splines,MESS,
+       mice,ggsci,data.table,survminer,ebal,emmeans,hms,ebal,gtsummary,
+       WeightIt,cobalt,backports, broom.helpers,scales,survival,forestplot,lme4,tableone, broom.mixed)
+```
+
+# Import model data ---
+Definition of variables are as follows:
+time: counting the days starting with the first measure of eGFR to this measure, day
+time_month: time/30, month
+time_year: time/365, year
+index_date: the date of the first measure of HbA1c
+end_date: the last measure of HbA1c or eGFR, which comes last.
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/main"
+
+dt <- fread("model long data.csv")
+dt <- dt %>% 
+  dplyr::select("anonymousID","visit_perYear", "Test_date_exam", "eGFR_test_value", "HbA1c_five_date",
+                "first_date", "last_date", "followup_eGFR", "time", "time_month", "time_year", 
+                "baseline_eGFR", "Date_visit_afterQC", "ID_confident", "anonymousOP", 
+                "Sex_fromID", "Hospital", "Age_current", "HbA1c_first", "Hba1c_auc","Hba1c_time_weighted", 
+                "index_date", "last_date_HbA1c",
+                "end_date", "followup", "HVS", "hypertension", "ASCVD", "IHD", "Department_visit_EN", 
+                "Urine_Albumin_test_value", "Urine_Albumin ug/min_test_value", 
+                "Urine_Albumin/Creatinine_test_value", "Urine_Protein/Creatinine_test_value", "LDL", 
+                "HVS_group","baseline_CKD","ARB_ACEI","CCB","MRA","venous_loop_diuretics",
+                "oral_loop_diuretics", "insulin",
+                "insulin_two","statins") %>% 
+  rename(Test_date_eGFR = Test_date_exam,
+         first_date_eGFR = first_date,
+         last_date_eGFR = last_date,
+         use_insulin = insulin_two)
+  
+dt$anonymousID %>% uniqueN()
+```
+# main analysis: total slope during follow up---
+## Individual eGFR slope ---
+Definition of variables are as follows:
+eGFR_slope_individual: Individual eGFR slope is average decline rate per year during the whole follow up, i.e.individual total eGFR slope
+eGFR_slope_group: eGFR_slope_individual categorized at a interval of 0.75 
+Outcome_eGFR_decline_fast: binary outcome, threshold is -5 or less (<= -5)
+```{r}
+setDT(dt)
+dt_each <- dt[, eGFR_slope_individual := coef(lm(eGFR_test_value ~ time_year, data = .SD))[[2]], by = anonymousID] %>% 
+  distinct(anonymousID,.keep_all = TRUE) %>% 
+  mutate(eGFR_slope_group = case_when(
+    eGFR_slope_individual > (-1) ~ "> -1 mL/min/1.73m²/y",
+    eGFR_slope_individual > (-2) & eGFR_slope_individual <= (-1) ~ "-1 to -2 mL/min/1.73m²/y",
+    eGFR_slope_individual > (-3) & eGFR_slope_individual <= (-2) ~ "-2 to -3 mL/min/1.73m²/y",
+    eGFR_slope_individual > (-4) & eGFR_slope_individual <= (-3) ~ "-3 to -4 mL/min/1.73m²/y",
+    eGFR_slope_individual > (-5) & eGFR_slope_individual <= (-4) ~ "-4 to -5 mL/min/1.73m²/y",
+    eGFR_slope_individual <= (-5)  ~ "≤ -5 mL/min/1.73m²/y"
+  )) %>% 
+  mutate_at(vars("eGFR_slope_group"), 
+            funs(factor(.,levels = c("> -1 mL/min/1.73m²/y", "-1 to -2 mL/min/1.73m²/y", 
+                                     "-2 to -3 mL/min/1.73m²/y", "-3 to -4 mL/min/1.73m²/y", "-4 to -5 mL/min/1.73m²/y", 
+                                     "≤ -5 mL/min/1.73m²/y")))) %>% 
+  mutate(Outcome_eGFR_decline_fast = case_when(
+    eGFR_slope_individual <= (-5) ~ 1,
+    eGFR_slope_individual > (-5) ~ 0
+  )) %>% 
+  mutate(baseline_CKD = case_when(
+    baseline_CKD == "0" ~ "Baseline eGFR ≥ 60 mL/min/1.73m²",
+    baseline_CKD == "1" ~ "Baseline eGFR < 60 mL/min/1.73m²",
+  )) %>% 
+  mutate(Age_group = case_when(
+    Age_current < 60 ~ "0",
+    Age_current >= 60 ~ "1"
+  )) 
+```
+## distribution of change of eGFR from baseline to last in each HVS group---
+```{r}
+library(ggh4x)
+
+dt_each %>% 
+  dplyr::select(anonymousID, HVS_group, baseline_eGFR, eGFR_slope_individual) %>% 
+  mutate(direction = case_when(
+    eGFR_slope_individual < 0 ~ "Decline",
+    TRUE ~ "Rise"
+  )) %>%
+  mutate(HVS_group = case_when(
+    HVS_group == "0 to 20" ~ "0 ≤ HVS ≤ 20 \nN = 506",
+    HVS_group == "20 to 40" ~ "20 < HVS ≤ 40 \nN = 585",
+    HVS_group == "40 to 60" ~ "40 < HVS ≤ 60 \nN = 661",
+    HVS_group == "60 to 80" ~ "60 < HVS ≤ 80 \nN = 444",
+    HVS_group == "80 to 100" ~ "80 < HVS ≤ 100 \nN = 201"
+  )) %>% 
+  ggplot(data = ., aes(x = reorder(anonymousID, baseline_eGFR)))+
+  geom_segment(aes(x = reorder(anonymousID, baseline_eGFR), xend = anonymousID,
+                   y = baseline_eGFR, yend = eGFR_slope_individual+baseline_eGFR,
+                   color = direction),
+               size=0.4) +
+  scale_color_manual(values = c("#C76967", "#CEDCDF"),
+                     name = "eGFR annual change") +
+  geom_point(aes(x = reorder(anonymousID, baseline_eGFR), y = baseline_eGFR),  size=0.1, color = "#fffdf6") +
+  scale_y_continuous(expand =c(0,0),
+                     breaks = seq(0, 150, 30),
+                     limits = c(0, 150)) +
+  facet_wrap2(~ HVS_group, ncol =5, strip.position = "bottom",
+              strip = strip_themed(
+                background_x = elem_list_rect(
+                  color = c( "#c1D8E6","#9fbdd5","#7ca3c2", "#6287a5", "#34658b"),
+                  fill = c("#c1D8E6", "#9fbdd5", "#7ca3c2", "#6287a5","#34658b"))
+              )) +
+  ylab("eGFR (mL/min/1.73m²)") +
+  theme_classic() +
+  theme(strip.placement = "outside",
+        strip.background = element_rect(
+          size = 3),
+        #strip.text = element_text(size = 10),
+        legend.position = c(0.15, 0.92),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank()) -> lollipop
+
+ggsave("eGFR baseline and its slope.png", width = 8, height = 6, plot = lollipop)
+```
+ 
+## distribution of eGFR slope across each group---
+```{r}
+library(ggstatsplot)
+library(ghibli)
+ggbarstats(
+  data = dt_each,
+  x = eGFR_slope_group,
+  y = HVS_group,
+  results.subtitle = FALSE,
+  label.args = list(alpha = 1, fill = "white",size=2),
+  title = "eGFR slope distribution acorss HVS group",
+  xlab  = "HVS group",
+  ylab = "Proportion (%)", 
+  legend.title = "eGFR_slope_group",
+  ggtheme  = ggplot2::theme_bw(),
+  ggplot.component = list(ggplot2::scale_x_discrete(guide = ggplot2::guide_axis(n.dodge = 2)),
+                          guides(fill= guide_legend("Individual eGFR slope"))),
+) + scale_fill_ghibli_d("MarnieLight1", direction = -1) -> plot_individual_eGFR_slope
+ggsave(file.path(pathout,"eGFR slope distribution acorss HVS group.png"), 
+       plot = plot_individual_eGFR_slope, 
+       width = 10, height = 8, units = "in")
+```
+## model analysis---
+### ipw---
+```{r}
+## ipw 
+covariate_formula <- " baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + Sex_fromID + Hba1c_time_weighted + visit_perYear"
+ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+w1 <- weightit(ps.formula,
+               data = dt_each,
+               method = "ebal",
+               distribution='multinomial',
+               estimand = "ATE",
+               stabilize = TRUE)
+
+set.cobalt.options(binary = "std")
+
+bal.tab(w1,un = TRUE, 
+        thresholds = c(m = 0.1))
+#link weights to our data
+dt_each$ipw <- w1$weights
+
+#visualization for assessing balance of co-variates
+new.names <- c("baseline_CKD_Baseline eGFR ≥ 60 mL/min/1.73m²" = "Baseline eGFR (<60/≥60)",
+               statins = "Ever use of statins (Y/N)",
+               hypertension = "Hypertension at baseline (Y/N)",
+               ASCVD = "ASCVD at baseline (Y/N)",
+               use_insulin = "Ever use of insulin (Y/N)",
+               ARB_ACEI = "Ever use of ARB/ACEI (Y/N)",
+               Age_current = "Age at baseline",
+               Sex_fromID_Male = "Sex",
+               Hba1c_time_weighted = "Time weighted HbA1c",
+               visit_perYear = "Number of visits per year"
+               )
+
+balance <- love.plot(w1, 
+                     stats =  c("m"), 
+                     drop.distance = TRUE,
+                     thresholds = c(m=0.1),
+                     abs = TRUE, 
+                     wrap = 20,
+                     line = TRUE,
+                     var.names = new.names,
+                     var.order = "unadjusted",
+                     sample.names = c("Unadjusted", "Weights adjusted"),
+                     position = c(0.75, 0.35), 
+                     shapes = c("circle", "triangle"),
+                     colors = c("#B4DAE5FF", "#F0D77BFF"),
+                     title = "Balance of covariates",
+                     themes = theme(legend.title = element_blank()))
+
+ggsave(file.path(pathout,"balance_eGFR slope value.png"), plot = balance, 
+       width = 6, height = 5, units = "in")
+```
+### logistic regression---
+#### total population analysis---
+```{r}
+glm_results_total <- glm(Outcome_eGFR_decline_fast ~  HVS_group, data = dt_each, weights=ipw) %>% 
+  tidy_plus_plus(exponentiate = TRUE, add_header_rows = TRUE) %>% 
+  dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  filter(label != "HVS_group") %>% 
+  mutate(conf.low = case_when(
+    is.na(conf.low) ~ 1,
+    TRUE ~ conf.low
+  )) %>% 
+  mutate(conf.high = case_when(
+    is.na(conf.high) ~ 1,
+    TRUE ~ conf.high
+  )) %>% 
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope >=5") %>% 
+  as_tibble() %>% 
+  rename(`HVS category` = label)
+
+#number of patients and events in each exposure group
+number_total <- dt_each %>% 
+  group_by(HVS_group) %>% 
+  summarise(N = n_distinct(anonymousID),
+            n = n_distinct(anonymousID[Outcome_eGFR_decline_fast == 1])
+                                       ) %>% 
+  mutate("n / N" = paste(n, N, sep=" / ")) %>% 
+  rename(`HVS category` = HVS_group) %>% 
+  dplyr::select(`HVS category`, "n / N")
+
+#combine number and glm results
+result_total <- left_join(x = glm_results_total,
+                          y = number_total, 
+                          by= "HVS category")
+
+#tidy results for forest plot
+result_total <- result_total %>% 
+  mutate(ORCI = case_when(
+    ORCI == '1.00 (1.00 to 1.00)' ~ NA_character_,
+    TRUE ~ ORCI
+  )) %>% 
+  rename("Odds ratio (95% CI)" = "ORCI") 
+
+write_xlsx(result_total, file.path(pathout,"total logistic results.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("HVS category" ,"n / N", "Odds ratio (95% CI)")
+  
+dt_plot <- result_total %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.05,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"total Odds ratio.png"), width = 7*300, height = 4*300, res = 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean=dt_plot$estimate,
+            lower=dt_plot$conf.low,
+            upper=dt_plot$conf.high,
+            align = c("l", "c", "c"),
+            is.summary=c(T,F,F,F,F,F),
+            graphwidth = unit(4, 'cm'),
+            xlog=TRUE,
+            xlab= "Estimates of odds ratio",
+            lineheight = 'auto',
+            line.margin =unit(3, 'mm'),
+            clip=c(0.95, 1.4),
+            xticks = c(0.95, 1.0, 1.1, 1.2, 1.3,1.4),
+            boxsize = (1/dt_plot$std.error)/250, 
+            txt_gp=fpTxtGp(label=gpar(cex=0.8),
+                           summary=gpar(cex=0.8, fontface='bold'),
+                           ticks=gpar(cex=0.8),
+                           xlab=gpar(cex = 0.8),
+                           title=gpar(cex = 0.8)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=1, cex=0.8, colgap=unit(0.7,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
+            graph.pos=3)
+dev.off()
+```
+#### subgroup analysis---
+```{r}
+#dataset
+subdt_sex <- dt_each %>% 
+  mutate(Subgroup = case_when(
+    Sex_fromID == "Male" ~ "Male",
+    Sex_fromID == "Female" ~ "Female"
+  ),
+  Subgroup_name = "Sex")
+
+subdt_age <- dt_each %>% 
+  mutate(Subgroup = case_when(
+    Age_current < 60 ~ "Age <60",
+    Age_current >= 60 ~ "Age ≥60"
+  ),
+  Subgroup_name = "Age")
+
+subdt_insulin <- dt_each %>%
+  mutate(Subgroup = case_when(
+    use_insulin == "1" ~ "Yes",
+    use_insulin == "0" ~ "No"
+  ),
+  Subgroup_name = "Ever use of insulin")
+
+subdt_eGFR <- dt_each %>% 
+   mutate(Subgroup = case_when(
+    baseline_eGFR < 60 ~ "<60 mL/min/1.73m²",
+    baseline_eGFR >= 60 ~ "≥60 mL/min/1.73m²"
+  ),
+  Subgroup_name = "Baseline eGFR")
+
+subdt_long <- bind_rows(subdt_sex, subdt_age, subdt_insulin, subdt_eGFR) %>% 
+  mutate_at(vars("Subgroup_name"), ~factor(.,levels = c("Sex", "Age", "Ever use of insulin", "Baseline eGFR")))
+
+#model analysis
+glm_results_sub <- subdt_long %>% 
+  nest_by(Subgroup_name, Subgroup) %>% 
+  mutate(Results = list(glm(Outcome_eGFR_decline_fast ~  HVS_group, data = data, weights=ipw) %>% 
+           tidy_plus_plus(exponentiate = TRUE, add_header_rows = TRUE))) %>% 
+  dplyr::select(Subgroup_name, Subgroup, Results) %>% 
+  unnest(Results) %>% 
+  dplyr::select("Subgroup_name", "Subgroup", "label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  filter(label != "HVS_group") %>% 
+  ungroup() %>% 
+  mutate(conf.low = case_when(
+    is.na(conf.low) ~ 1,
+    TRUE ~ conf.low
+  )) %>% 
+  mutate(conf.high = case_when(
+    is.na(conf.high) ~ 1,
+    TRUE ~ conf.high
+  )) %>% 
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope >=5") %>% 
+  as_tibble() %>% 
+  rename(`HVS category` = label)
+
+#number of patients and events in each exposure group
+number_sub <- subdt_long %>% 
+  nest_by(Subgroup) %>% 
+  mutate(N_distinct = list(data %>% 
+                             group_by(HVS_group) %>% 
+                             summarise(N = n_distinct(anonymousID),
+                                       n = n_distinct(anonymousID[Outcome_eGFR_decline_fast == 1])
+                                       ))) %>% 
+  dplyr::select(Subgroup, N_distinct) %>% 
+  unnest(N_distinct) %>% 
+  ungroup() %>% 
+  mutate("n / N" = paste(n, N, sep=" / ")) %>% 
+  rename(`HVS category` = HVS_group) %>% 
+  dplyr::select("Subgroup",`HVS category`, "n / N")
+
+#combine number and glm results
+result_sub <- left_join(x = glm_results_sub,
+                        y = number_sub,
+                        by = c("Subgroup","HVS category"))
+
+#tidy results for forest plot
+result_sub <- result_sub %>% 
+  mutate(Subgroup = paste0("   ", Subgroup)) %>% 
+  as_tibble() %>%
+  group_by(Subgroup_name) %>% 
+  group_modify(~ add_row(.,.before=0)) %>% 
+  ungroup()%>% 
+  rename("Odds ratio (95% CI)" = "ORCI") 
+
+setDT(result_sub)
+result_sub[
+  is.na(Subgroup), Subgroup:=Subgroup_name
+  ][!`HVS category`%in%c("0 to 20",NA), Subgroup:=NA
+  ][`Odds ratio (95% CI)` == '1.00 (1.00 to 1.00)', `Odds ratio (95% CI)`:=NA
+  ]
+
+write_xlsx(result_sub,file.path(pathout,"subgroup logistic results.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("Subgroup", "HVS category", "n / N", "Odds ratio (95% CI)")
+  
+dt_plot <- result_sub %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category`=="0 to 20" ~ 0.05,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"Subgroup Odds ratio.png"), width = 12*300, height = 16*300, res = 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),#设置用于文本展示的列,在图中展示
+            mean=dt_plot$estimate,
+            lower=dt_plot$conf.low,
+            upper=dt_plot$conf.high,
+            align = c("l", "l", "c","c"),
+            is.summary=c(T,T,F,F,F,F,F,
+                         F,F,F,F,F,
+                         T,F,F,F,F,F,
+                         F,F,F,F,F,
+                         T,F,F,F,F,F,
+                         F,F,F,F,F,
+                         T,F,F,F,F,F,
+                         F,F,F,F,F),
+            clip=c(0.9, 1.6),
+            xticks = c(0.9, 1.0, 1.2, 1.4, 1.6),
+            graphwidth = unit(7, 'cm'),
+            xlog=TRUE,
+            xlab= "Estimates of odds ratio",
+            lineheight = 'auto',
+            line.margin =unit(3, 'mm'),
+            boxsize = (1/dt_plot$std.error)/150, 
+            txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                           summary=gpar(cex=1.35, fontface='bold'),
+                           ticks=gpar(cex=1.2),
+                           xlab=gpar(cex = 1.4),
+                           title=gpar(cex = 1.35)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=1, cex=1,  colgap=unit(1,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+            graph.pos=4) 
+dev.off()
+```
+####interaction term---
+```{r}
+glm_interaction_results <- subdt_long %>% 
+  nest_by(Subgroup_name) %>% 
+  mutate(Results = list(glm(Outcome_eGFR_decline_fast ~  HVS_group*Subgroup, data = data, weights=ipw) %>% 
+           tidy_plus_plus(exponentiate = TRUE, add_header_rows = TRUE))) %>% 
+  dplyr::select(Subgroup_name, Results) %>% 
+  unnest(Results) %>% 
+  filter(var_type == "interaction") %>% 
+  dplyr::select("Subgroup_name", "label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  filter(label != "HVS_group") %>% 
+  ungroup() %>% 
+  mutate(conf.low = case_when(
+    is.na(conf.low) ~ 1,
+    TRUE ~ conf.low
+  )) %>% 
+  mutate(conf.high = case_when(
+    is.na(conf.high) ~ 1,
+    TRUE ~ conf.high
+  )) %>% 
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope >=5") %>% 
+  as_tibble() %>% 
+  rename("Interaction term" = label)
+
+write_xlsx(glm_interaction_results, file.path(pathout,"interaction logisitc results.xlsx"))
+```
+# sensitivity analysis ---
+## adjusting HbA1c first instead of HbA1c time weighted---
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/Hba1c first"
+## ipw 
+covariate_formula <- " baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + Sex_fromID + HbA1c_first + visit_perYear"
+
+ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+w1 <- weightit(ps.formula,
+               data = dt_each,
+               method = "ebal",
+               distribution='multinomial',
+               estimand = "ATE",
+               stabilize = TRUE)
+
+set.cobalt.options(binary = "std")
+
+bal.tab(w1,un = TRUE, 
+        thresholds = c(m = 0.1))
+#link weights to our data
+dt_each$ipw <- w1$weights
+
+glm_results_total <- glm(Outcome_eGFR_decline_fast ~  HVS_group, data = dt_each, weights=ipw) %>% 
+  tidy_plus_plus(exponentiate = TRUE, add_header_rows = TRUE) %>% 
+  dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  filter(label != "HVS_group") %>% 
+  mutate(conf.low = case_when(
+    is.na(conf.low) ~ 1,
+    TRUE ~ conf.low
+  )) %>% 
+  mutate(conf.high = case_when(
+    is.na(conf.high) ~ 1,
+    TRUE ~ conf.high
+  )) %>% 
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope >=5") %>% 
+  as_tibble() %>% 
+  rename(`HVS category` = label)
+
+#number of patients and events in each exposure group
+number_total <- dt_each %>% 
+  group_by(HVS_group) %>% 
+  summarise(N = n_distinct(anonymousID),
+            n = n_distinct(anonymousID[Outcome_eGFR_decline_fast == 1])
+                                       ) %>% 
+  mutate("n / N" = paste(n, N, sep=" / ")) %>% 
+  rename(`HVS category` = HVS_group) %>% 
+  dplyr::select(`HVS category`, "n / N")
+
+#combine number and glm results
+result_total <- left_join(x = glm_results_total,
+                          y = number_total, 
+                          by= "HVS category")
+
+#tidy results for forest plot
+result_total <- result_total %>% 
+  mutate(ORCI = case_when(
+    ORCI == '1.00 (1.00 to 1.00)' ~ NA_character_,
+    TRUE ~ ORCI
+  )) %>% 
+  rename("Odds ratio (95% CI)" = "ORCI") 
+
+write_xlsx(result_total, file.path(pathout,"logistic results_HbA1c first.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("HVS category" ,"n / N", "Odds ratio (95% CI)")
+  
+dt_plot <- result_total %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.05,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"Odds ratio_HbA1c first.png"), width = 7*300, height = 4*300, res = 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean=dt_plot$estimate,
+            lower=dt_plot$conf.low,
+            upper=dt_plot$conf.high,
+            align = c("l", "c", "c"),
+            is.summary=c(T,F,F,F,F,F),
+            graphwidth = unit(4, 'cm'),
+            xlog=TRUE,
+            xlab= "Estimates of odds ratio",
+            lineheight = 'auto',
+            line.margin =unit(3, 'mm'),
+            clip=c(0.95, 1.4),
+            xticks = c(0.95, 1.0, 1.1, 1.2, 1.3,1.4),
+            boxsize = (1/dt_plot$std.error)/250, 
+            txt_gp=fpTxtGp(label=gpar(cex=0.8),
+                           summary=gpar(cex=0.8, fontface='bold'),
+                           ticks=gpar(cex=0.8),
+                           xlab=gpar(cex = 0.8),
+                           title=gpar(cex = 0.8)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=1, cex=0.8, colgap=unit(0.7,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
+            graph.pos=3)
+dev.off()
+```
+## population with similar measurement duration beween HbA1c and eGFR--- 
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/not excess 90 days"
+## identify study population
+dt_sensitivity <- dt %>%
+  mutate(diff_last_date = as.numeric(difftime(last_date_eGFR, last_date_HbA1c, units = "days"))) %>%
+  subset(abs(diff_last_date) <= 90) 
+
+## select study population from dt_each
+dt_each_sensitivity <- dt_each %>% 
+  filter(anonymousID %in% dt_sensitivity$anonymousID)
+
+## ipw 
+covariate_formula <- " baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + Sex_fromID + Hba1c_time_weighted + visit_perYear"
+ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+w1 <- weightit(ps.formula,
+               data = dt_each_sensitivity,
+               method = "ebal",
+               distribution='multinomial',
+               estimand = "ATE",
+               stabilize = TRUE)
+
+set.cobalt.options(binary = "std")
+
+bal.tab(w1,un = TRUE, 
+        thresholds = c(m = 0.1))
+#link weights to our data
+dt_each_sensitivity$ipw <- w1$weights
+
+glm_results_total <- glm(Outcome_eGFR_decline_fast ~  HVS_group, data = dt_each_sensitivity, weights=ipw) %>% 
+  tidy_plus_plus(exponentiate = TRUE, add_header_rows = TRUE) %>% 
+  dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  filter(label != "HVS_group") %>% 
+  mutate(conf.low = case_when(
+    is.na(conf.low) ~ 1,
+    TRUE ~ conf.low
+  )) %>% 
+  mutate(conf.high = case_when(
+    is.na(conf.high) ~ 1,
+    TRUE ~ conf.high
+  )) %>% 
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope >=5") %>% 
+  as_tibble() %>% 
+  rename(`HVS category` = label)
+
+#number of patients and events in each exposure group
+number_total <- dt_each_sensitivity %>% 
+  group_by(HVS_group) %>% 
+  summarise(N = n_distinct(anonymousID),
+            n = n_distinct(anonymousID[Outcome_eGFR_decline_fast == 1])
+                                       ) %>% 
+  mutate("n / N" = paste(n, N, sep=" / ")) %>% 
+  rename(`HVS category` = HVS_group) %>% 
+  dplyr::select(`HVS category`, "n / N")
+
+#combine number and glm results
+result_total <- left_join(x = glm_results_total,
+                          y = number_total, 
+                          by= "HVS category")
+
+#tidy results for forest plot
+result_total <- result_total %>% 
+  mutate(ORCI = case_when(
+    ORCI == '1.00 (1.00 to 1.00)' ~ NA_character_,
+    TRUE ~ ORCI
+  )) %>% 
+  rename("Odds ratio (95% CI)" = "ORCI") 
+
+write_xlsx(result_total, file.path(pathout,"logistic results_90 days.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("HVS category" ,"n / N", "Odds ratio (95% CI)")
+  
+dt_plot <- result_total %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.05,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"Odds ratio_90 days.png"), width = 7*300, height = 4*300, res = 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean=dt_plot$estimate,
+            lower=dt_plot$conf.low,
+            upper=dt_plot$conf.high,
+            align = c("l", "c", "c"),
+            is.summary=c(T,F,F,F,F,F),
+            graphwidth = unit(4, 'cm'),
+            xlog=TRUE,
+            xlab= "Estimates of odds ratio",
+            lineheight = 'auto',
+            line.margin =unit(3, 'mm'),
+            clip=c(0.95, 1.4),
+            xticks = c(0.95, 1.0, 1.1, 1.2, 1.3,1.4),
+            boxsize = (1/dt_plot$std.error)/250, 
+            txt_gp=fpTxtGp(label=gpar(cex=0.8),
+                           summary=gpar(cex=0.8, fontface='bold'),
+                           ticks=gpar(cex=0.8),
+                           xlab=gpar(cex = 0.8),
+                           title=gpar(cex = 0.8)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=1, cex=0.8, colgap=unit(0.7,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
+            graph.pos=3)
+dev.off()
+```
+## exclude baseline eGFR<30---
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/exclude eGFR 30"
+
+## select study population from dt_each
+dt_each_sensitivity <- dt_each %>% 
+  filter(baseline_eGFR >=30)
+
+## ipw 
+covariate_formula <- " baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + Sex_fromID + Hba1c_time_weighted + visit_perYear"
+ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+w1 <- weightit(ps.formula,
+               data = dt_each_sensitivity,
+               method = "ebal",
+               distribution='multinomial',
+               estimand = "ATE",
+               stabilize = TRUE)
+
+set.cobalt.options(binary = "std")
+
+bal.tab(w1,un = TRUE, 
+        thresholds = c(m = 0.1))
+#link weights to our data
+dt_each_sensitivity$ipw <- w1$weights
+
+glm_results_total <- glm(Outcome_eGFR_decline_fast ~  HVS_group, data = dt_each_sensitivity, weights=ipw) %>% 
+  tidy_plus_plus(exponentiate = TRUE, add_header_rows = TRUE) %>% 
+  dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  filter(label != "HVS_group") %>% 
+  mutate(conf.low = case_when(
+    is.na(conf.low) ~ 1,
+    TRUE ~ conf.low
+  )) %>% 
+  mutate(conf.high = case_when(
+    is.na(conf.high) ~ 1,
+    TRUE ~ conf.high
+  )) %>% 
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope >=5") %>% 
+  as_tibble() %>% 
+  rename(`HVS category` = label)
+
+#number of patients and events in each exposure group
+number_total <- dt_each_sensitivity %>% 
+  group_by(HVS_group) %>% 
+  summarise(N = n_distinct(anonymousID),
+            n = n_distinct(anonymousID[Outcome_eGFR_decline_fast == 1])
+                                       ) %>% 
+  mutate("n / N" = paste(n, N, sep=" / ")) %>% 
+  rename(`HVS category` = HVS_group) %>% 
+  dplyr::select(`HVS category`, "n / N")
+
+#combine number and glm results
+result_total <- left_join(x = glm_results_total,
+                          y = number_total, 
+                          by= "HVS category")
+
+#tidy results for forest plot
+result_total <- result_total %>% 
+  mutate(ORCI = case_when(
+    ORCI == '1.00 (1.00 to 1.00)' ~ NA_character_,
+    TRUE ~ ORCI
+  )) %>% 
+  rename("Odds ratio (95% CI)" = "ORCI") 
+
+write_xlsx(result_total, file.path(pathout,"logistic results_baseline eGFR.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("HVS category" ,"n / N", "Odds ratio (95% CI)")
+  
+dt_plot <- result_total %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.05,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"Odds ratio_baseline eGFR.png"), width = 7*300, height = 4*300, res = 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean=dt_plot$estimate,
+            lower=dt_plot$conf.low,
+            upper=dt_plot$conf.high,
+            align = c("l", "c", "c"),
+            is.summary=c(T,F,F,F,F,F),
+            graphwidth = unit(4, 'cm'),
+            xlog=TRUE,
+            xlab= "Estimates of odds ratio",
+            lineheight = 'auto',
+            line.margin =unit(3, 'mm'),
+            clip=c(0.95, 1.4),
+            xticks = c(0.95, 1.0, 1.1, 1.2, 1.3,1.4),
+            boxsize = (1/dt_plot$std.error)/250, 
+            txt_gp=fpTxtGp(label=gpar(cex=0.8),
+                           summary=gpar(cex=0.8, fontface='bold'),
+                           ticks=gpar(cex=0.8),
+                           xlab=gpar(cex = 0.8),
+                           title=gpar(cex = 0.8)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=1, cex=0.8, colgap=unit(0.7,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
+            graph.pos=3)
+dev.off()
+```
+## chronic slope by year
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/Chronic slope by year"
+#slope function
+## input is data table
+## output id data with eGFR slope, format as "person-row"
+slope_function <- function(input){
+  data_output <- input[, eGFR_slope_individual := coef(lm(eGFR_test_value ~ time_year, data = .SD))[[2]], by = anonymousID] %>%
+    distinct(anonymousID,.keep_all = TRUE) %>% 
+    mutate(eGFR_slope_group = case_when(
+      eGFR_slope_individual > (-1) ~ "> -1 mL/min/1.73m²/y",
+      eGFR_slope_individual > (-2) & eGFR_slope_individual <= (-1) ~ "-1 to -2 mL/min/1.73m²/y",
+      eGFR_slope_individual > (-3) & eGFR_slope_individual <= (-2) ~ "-2 to -3 mL/min/1.73m²/y",
+      eGFR_slope_individual > (-4) & eGFR_slope_individual <= (-3) ~ "-3 to -4 mL/min/1.73m²/y",
+      eGFR_slope_individual > (-5) & eGFR_slope_individual <= (-4) ~ "-4 to -5 mL/min/1.73m²/y",
+      eGFR_slope_individual <= (-5)  ~ "≤ -5 mL/min/1.73m²/y"
+      )) %>% 
+    mutate_at(vars("eGFR_slope_group"), 
+              funs(factor(.,levels = c("> -1 mL/min/1.73m²/y", "-1 to -2 mL/min/1.73m²/y", 
+                                     "-2 to -3 mL/min/1.73m²/y", "-3 to -4 mL/min/1.73m²/y", "-4 to -5 mL/min/1.73m²/y", 
+                                     "≤ -5 mL/min/1.73m²/y")))) %>%
+    mutate(Outcome_eGFR_decline_fast = case_when(
+      eGFR_slope_individual <= (-5) ~ 1,
+      eGFR_slope_individual > (-5) ~ 0
+      ))
+  return(data_output)
+}
+
+#set study year specific !!!!!!!!!!
+years <- c(2,3,4,5)
+result_byYear <- data.frame()
+
+for(i in 1:length(years)){
+  year <- years[i] 
+  varname <- paste0(year,"-year eGFR slope")
+  
+  setDT(dt)
+  dt_Year <- dt[time_year<=year,] %>% 
+    slope_function() %>% 
+    as_tibble() %>% 
+    filter(!is.na(eGFR_slope_individual))
+  
+  ## ipw 
+  covariate_formula <- " baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + Sex_fromID + Hba1c_time_weighted + visit_perYear"
+  ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+  w1 <- weightit(ps.formula,
+                 data = dt_Year,
+                 method = "ebal",
+                 distribution='multinomial',
+                 estimand = "ATE",
+                 stabilize = TRUE)
+  
+  set.cobalt.options(binary = "std")
+  
+  bal.tab(w1,un = TRUE, 
+          thresholds = c(m = 0.1))
+  #link weights to our data
+  dt_Year$ipw <- w1$weights
+  
+  glm_results_total <- glm(Outcome_eGFR_decline_fast ~  HVS_group, data = dt_Year, weights=ipw) %>% 
+    tidy_plus_plus(exponentiate = TRUE, add_header_rows = TRUE) %>% 
+    dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+    filter(label != "HVS_group") %>% 
+    mutate(conf.low = case_when(
+      is.na(conf.low) ~ 1,
+      TRUE ~ conf.low
+    )) %>% 
+    mutate(conf.high = case_when(
+      is.na(conf.high) ~ 1,
+      TRUE ~ conf.high
+    )) %>% 
+    mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+    mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+           Outcome = paste0(varname, " ≥5")) %>% 
+    as_tibble() %>% 
+    rename(`HVS category` = label)
+  
+  #number of patients and events in each exposure group
+  number_total <- dt_Year %>% 
+    group_by(HVS_group) %>% 
+    summarise(N = n_distinct(anonymousID),
+              n = n_distinct(anonymousID[Outcome_eGFR_decline_fast == 1])
+                                         ) %>% 
+    mutate("n / N" = paste(n, N, sep=" / ")) %>% 
+    rename(`HVS category` = HVS_group) %>% 
+    dplyr::select(`HVS category`, "n / N")
+  
+  #combine number and glm results
+  result_total <- left_join(x = glm_results_total,
+                            y = number_total, 
+                            by= "HVS category")
+  
+  #tidy results for forest plot
+  result_total <- result_total %>% 
+    mutate(ORCI = case_when(
+      ORCI == '1.00 (1.00 to 1.00)' ~ NA_character_,
+      TRUE ~ ORCI
+    )) %>% 
+    rename("Odds ratio (95% CI)" = "ORCI") %>% 
+    mutate(Outcome = NA) %>% 
+    add_row(Outcome = paste0(varname, "\n ≤ -5 mL/min/1.73m²/y"), .before = 1)
+  
+  result_byYear <- rbind(result_byYear, result_total)
+}
+
+write_xlsx(result_byYear, file.path(pathout, "logistic results_byYear.xlsx"))
+```
+###forest plot for chronic slope by year---
+```{r}
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("Outcome", "HVS category" ,"n / N", "Odds ratio (95% CI)")
+  
+dt_plot <- result_byYear %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.05,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"Odds ratio_byYear.png"), width = 9*300, height = 12*300, res = 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean=dt_plot$estimate,
+            lower=dt_plot$conf.low,
+            upper=dt_plot$conf.high,
+            align = c("l", "l", "c", "c"),
+            is.summary=c(T,T,F,F,F,F,F,
+                         T,F,F,F,F,F,
+                         T,F,F,F,F,F,
+                         T,F,F,F,F,F),
+            graphwidth = unit(4, 'cm'),
+            xlog=TRUE,
+            xlab= "Estimates of odds ratio",
+            lineheight = 'auto',
+            line.margin =unit(3, 'mm'),
+            clip=c(0.95, 1.4),
+            xticks = c(0.95, 1.0, 1.1, 1.2, 1.3,1.4),
+            boxsize = (1/dt_plot$std.error)/250, 
+            txt_gp=fpTxtGp(label=gpar(cex=1),
+                           summary=gpar(cex=1, fontface='bold'),
+                           ticks=gpar(cex=1),
+                           xlab=gpar(cex = 1)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=1, cex=0.8, colgap=unit(0.7,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
+            graph.pos=4)
+dev.off()
+```
+## exclude patients used SGLT2 or GLP1
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/exclude sglt2 glp1 user"
+
+SgltGlp <- fread("SGLT_GLP.csv")
+
+## select study population from dt_each
+dt_each_sensitivity <- dt_each %>% 
+  filter(!anonymousID %in% SgltGlp$anonymousID)
+
+## ipw 
+covariate_formula <- " baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + Sex_fromID + Hba1c_time_weighted + visit_perYear"
+ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+w1 <- weightit(ps.formula,
+               data = dt_each_sensitivity,
+               method = "ebal",
+               distribution='multinomial',
+               estimand = "ATE",
+               stabilize = TRUE)
+
+set.cobalt.options(binary = "std")
+
+bal.tab(w1,un = TRUE, 
+        thresholds = c(m = 0.1))
+#link weights to our data
+dt_each_sensitivity$ipw <- w1$weights
+
+glm_results_total <- glm(Outcome_eGFR_decline_fast ~  HVS_group, data = dt_each_sensitivity, weights=ipw) %>% 
+  tidy_plus_plus(exponentiate = TRUE, add_header_rows = TRUE) %>% 
+  dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  filter(label != "HVS_group") %>% 
+  mutate(conf.low = case_when(
+    is.na(conf.low) ~ 1,
+    TRUE ~ conf.low
+  )) %>% 
+  mutate(conf.high = case_when(
+    is.na(conf.high) ~ 1,
+    TRUE ~ conf.high
+  )) %>% 
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope >=5") %>% 
+  as_tibble() %>% 
+  rename(`HVS category` = label)
+
+#number of patients and events in each exposure group
+number_total <- dt_each_sensitivity %>% 
+  group_by(HVS_group) %>% 
+  summarise(N = n_distinct(anonymousID),
+            n = n_distinct(anonymousID[Outcome_eGFR_decline_fast == 1])
+                                       ) %>% 
+  mutate("n / N" = paste(n, N, sep=" / ")) %>% 
+  rename(`HVS category` = HVS_group) %>% 
+  dplyr::select(`HVS category`, "n / N")
+
+#combine number and glm results
+result_total <- left_join(x = glm_results_total,
+                          y = number_total, 
+                          by= "HVS category")
+
+#tidy results for forest plot
+result_total <- result_total %>% 
+  mutate(ORCI = case_when(
+    ORCI == '1.00 (1.00 to 1.00)' ~ NA_character_,
+    TRUE ~ ORCI
+  )) %>% 
+  rename("Odds ratio (95% CI)" = "ORCI") 
+
+write_xlsx(result_total, file.path(pathout,"logistic results_exclude sglt glp user eGFR.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("HVS category" ,"n / N", "Odds ratio (95% CI)")
+  
+dt_plot <- result_total %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.05,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"Odds ratio_exclude sglt glp user eGFR.png"), width = 7*300, height = 4*300, res = 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean=dt_plot$estimate,
+            lower=dt_plot$conf.low,
+            upper=dt_plot$conf.high,
+            align = c("l", "c", "c"),
+            is.summary=c(T,F,F,F,F,F),
+            graphwidth = unit(4, 'cm'),
+            xlog=TRUE,
+            xlab= "Estimates of odds ratio",
+            lineheight = 'auto',
+            line.margin =unit(3, 'mm'),
+            clip=c(0.95, 1.4),
+            xticks = c(0.95, 1.0, 1.1, 1.2, 1.3,1.4),
+            boxsize = (1/dt_plot$std.error)/250, 
+            txt_gp=fpTxtGp(label=gpar(cex=0.8),
+                           summary=gpar(cex=0.8, fontface='bold'),
+                           ticks=gpar(cex=0.8),
+                           xlab=gpar(cex = 0.8),
+                           title=gpar(cex = 0.8)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=1, cex=0.8, colgap=unit(0.7,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
+            graph.pos=3)
+dev.off()
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
