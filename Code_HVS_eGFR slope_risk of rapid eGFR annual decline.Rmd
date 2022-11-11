@@ -7,9 +7,8 @@ editor_options:
 # load cran ---
 ```{r}
 library(pacman)
-p_load(readxl,plyr,writexl,dplyr,tidyr,ggplot2,stringr,lubridate,purrr,tidyverse,rms,interactions, splines,MESS,
-       mice,ggsci,data.table,survminer,ebal,emmeans,hms,ebal,gtsummary,
-       WeightIt,cobalt,backports, broom.helpers,scales,survival,forestplot,lme4,tableone, broom.mixed)
+p_load(readxl,plyr,writexl,dplyr,tidyr,ggplot2,stringr,lubridate,purrr,tidyverse,rms,interactions,splines,MESS,
+       mice,data.table,survminer,ebal,emmeans,WeightIt,cobalt,backports, broom.helpers,scales,survival,forestplot,lme4,tableone,broom.mixed)
 ```
 
 # Import model data ---
@@ -19,6 +18,7 @@ time_month: time/30, month
 time_year: time/365, year
 index_date: the date of the first measure of HbA1c
 end_date: the last measure of HbA1c or eGFR, which comes last.
+
 ```{r}
 pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/main"
 
@@ -1096,8 +1096,6 @@ forestplot (labeltext = as.matrix(dt_plot[,text]),
             lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
             graph.pos=3)
 dev.off()
-
-
 ```
 
 
