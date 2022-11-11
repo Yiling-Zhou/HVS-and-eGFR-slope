@@ -1,0 +1,1146 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+# load cran ---
+```{r}
+library(pacman)
+p_load(readxl,plyr,writexl,dplyr,tidyr,ggplot2,stringr,lubridate,purrr,tidyverse,rms,interactions, splines,MESS,
+       mice,ggsci,data.table,survminer,ebal,emmeans,hms,ebal,
+       WeightIt,cobalt,backports, broom.helpers,scales,survival,forestplot,lme4,tableone, broom.mixed)
+```
+# Import model data ---
+Definition of variables are as follows:
+time: counting the days starting with the first measure of eGFR to this measure, day
+time_month: time/30, month
+time_year: time/365, year
+index_date: the date of the first measure of HbA1c
+end_date: the last measure of HbA1c or eGFR, which comes last.
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/main"
+
+dt <- fread("model long data.csv")
+dt <- dt %>% 
+  dplyr::select("anonymousID","visit_perYear", "Test_date_exam", "eGFR_test_value", "HbA1c_five_date",
+                "first_date", "last_date", "followup_eGFR", "time", "time_month", "time_year", 
+                "baseline_eGFR", "Date_visit_afterQC", "ID_confident", "anonymousOP", 
+                "Sex_fromID", "Hospital", "Age_current", "HbA1c_first", "Hba1c_auc","Hba1c_time_weighted", 
+                "index_date", "last_date_HbA1c","rank_test",
+                "end_date", "followup", "HVS", "hypertension", "ASCVD", "IHD", "Department_visit_EN", 
+                "Urine_Albumin_test_value", "Urine_Albumin ug/min_test_value", 
+                "Urine_Albumin/Creatinine_test_value", "Urine_Protein/Creatinine_test_value", "LDL", 
+                "HVS_group","baseline_CKD","ARB_ACEI","CCB","MRA","venous_loop_diuretics",
+                "oral_loop_diuretics", "insulin",
+                "insulin_two","statins") %>% 
+  rename(Test_date_eGFR = Test_date_exam,
+         first_date_eGFR = first_date,
+         last_date_eGFR = last_date,
+         use_insulin = insulin_two)
+  
+dt$anonymousID %>% uniqueN()
+```
+# main analysis: total slope during follow up---
+## ipw---
+```{r}
+#ipw 
+covariate_formula <- "baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + 
+Sex_fromID + Hba1c_time_weighted + visit_perYear"
+
+ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+w1 <- weightit(ps.formula,
+               data = dt,
+               method = "ebal",
+               distribution='multinomial',
+               estimand = "ATE",
+               stabilize = TRUE)
+
+set.cobalt.options(binary = "std")
+bal.tab(w1,un = TRUE, 
+        thresholds = c(m = 0.1))
+
+dt$ipw <- w1$weights
+
+#visualization for assessing balance of co-variates
+new.names <- c("baseline_CKD" = "Baseline eGFR (<60/≥60)",
+               statins = "Ever use of statins (Y/N)",
+               hypertension = "Hypertension at baseline (Y/N)",
+               ASCVD = "ASCVD at baseline (Y/N)",
+               use_insulin = "Ever use of insulin (Y/N)",
+               ARB_ACEI = "Ever use of ARB/ACEI (Y/N)",
+               Age_current = "Age at baseline",
+               Sex_fromID_Male = "Sex",
+               Hba1c_time_weighted = "Time weighted HbA1c",
+               visit_perYear = "Number of visits per year"
+               )
+
+balance <- love.plot(w1, 
+                     stats =  c("m"), 
+                     drop.distance = TRUE,
+                     thresholds = c(m=0.1),
+                     abs = TRUE, 
+                     wrap = 20,
+                     line = TRUE,
+                     var.names = new.names,
+                     var.order = "unadjusted",
+                     sample.names = c("Unadjusted", "Weights adjusted"),
+                     shapes = c("circle", "triangle"),
+                     position = c(0.75, 0.35), 
+                     colors = c("#B4DAE5FF", "#F0D77BFF"),
+                     title = "Balance of covariates",
+                     themes = theme(legend.title = element_blank()))
+
+ggsave(file.path(pathout,"balance_eGFR slope MID.png"), plot = balance, 
+       width = 6, height = 5, units = "in")
+```
+## non-linear of eGFR trajectory on time---
+```{r}
+model <- lmer(eGFR_test_value ~  ns(time_year,3)*HVS_group + (1+ns(time_year,3)|anonymousID), 
+              REML=TRUE, data= dt, weights=ipw)
+library(ghibli)
+png(file.path(pathout,"5 years_nonlinear.png"),height=300*6,width=300*10,res=300)
+interact_plot(model, pred = time_year,
+              modx = HVS_group,
+              interval = TRUE,
+              int.type = "confidence",
+              x.label = "Time (year)",
+              y.label = "eGFR (mL/min/1.73m²)",
+              legend.main = "HVS (%)",
+              vary.lty = FALSE,
+              line.thickness = 2,
+              data = dt,
+              colors = c("#B4DAE5FF", "#5C5992FF", 
+                         "#AE93BEFF", "#1C77A3FF", "#F0D77BFF"),
+              int.alpha=0.5)+
+  scale_x_continuous(limits=c(0, 5), breaks=seq(0,5,1),
+                    labels=c("0", "1", "2", "3", "4", "≥5"))+
+  scale_y_continuous(limits=c(78,95))+
+  theme_classic2()+
+  theme(legend.text = element_text(size=18),
+        legend.title = element_text(size=20, face="bold"),
+        #legend.position = c(0.85,0.8),
+        axis.text = element_text(size=18),
+        axis.title = element_text(size=18))
+dev.off()
+```
+
+## mixed effects model---
+### total population---
+```{r}
+#model analysis
+lmer_results_total <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), 
+                           REML=TRUE, data=dt, weights=ipw) %>% 
+  tidy_plus_plus(exponentiate = FALSE, add_header_rows = TRUE) %>% 
+  filter(var_type == "interaction") %>% 
+  dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope MID") %>% 
+  mutate(label = str_split_fixed(label,"\\*",2)[,2] %>%
+           str_remove(.," ")) %>% 
+  filter(label != "HVS_group") %>% 
+  as_tibble() %>% 
+  add_row(label="0 to 20", estimate="0", conf.low="0", conf.high="0",  .before=1) %>% 
+  rename(`HVS category` = label)
+
+#number of patients in each exposure group
+number_total <- dt %>% 
+  group_by(HVS_group) %>% 
+  summarise(N = n_distinct(anonymousID)) %>% 
+  rename(`HVS category` = HVS_group)
+
+#combine number and lmer results
+result_total <- left_join(x = lmer_results_total,
+                          y = number_total, 
+                          by= "HVS category")
+
+#tidy results for forest plot
+result_total <- result_total %>% 
+  rename("Mean difference (95% CI)" = "ORCI") 
+
+#average slope in each exposure group
+model_linear <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), 
+                     REML=TRUE, data=dt, weights=ipw)
+cc_linear <- emtrends(model_linear, specs = trt.vs.ctrlk ~ HVS_group, 
+                      var = "time_year", ref=1)
+slope <- cc_linear$emtrends %>% 
+  summary(infer = TRUE) %>% 
+  as.data.frame() %>% 
+  mutate_at(vars("time_year.trend", "asymp.LCL", "asymp.UCL"), ~sprintf("%.2f", .x)) %>% 
+  mutate(Slope = paste0(time_year.trend, " (", asymp.LCL, " to ", asymp.UCL, ")")) %>% 
+  dplyr::select(HVS_group, Slope) %>% 
+  rename("Slope (95% CI)" = Slope,
+         "HVS category" = "HVS_group")
+
+#combine lmer results and average slope
+result_total <- result_total %>% 
+  left_join(., slope, by="HVS category") 
+
+write_xlsx(result_total, file.path(pathout,"total lmer results.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("HVS category", "N", "Slope (95% CI)" , "Mean difference (95% CI)")
+  
+dt_plot <- result_total %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.5,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"total MID.png"), height = 300*5, width =300*10,res= 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean = dt_plot$estimate,
+            lower = dt_plot$conf.low,
+            upper = dt_plot$conf.high,
+            align = c("l", "c", "c", "c"),
+            is.summary = c(T,F,F,F,F,F),
+            graphwidth = unit(7, 'cm'),
+            #xlog = TRUE,
+            xlab = "Estimates of mean difference",
+            boxsize = (1/dt_plot$std.error)/20, 
+            lineheight = 'auto',
+            line.margin = unit(3, 'mm'),
+            clip = c(-2.5, 0.5),
+            xticks = c(-2.5, -2.0, -1.5, -0.75, 0, 0.5),
+            grid = structure(c(-0.75),
+                             gp = gpar(lty=2, col="#c08367")),
+            txt_gp=fpTxtGp(label=gpar(cex=1.1),
+                           summary=gpar(cex=1.15, fontface='bold'),
+                           ticks=gpar(cex=1.1),
+                           xlab=gpar(cex = 1.25),
+                           title=gpar(cex = 1.25)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=0, cex=0.8, colgap=unit(0.6,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
+            graph.pos=4)
+dev.off()
+```
+### subgroup analysis---
+```{r}
+#dataset
+subdt_sex <- dt %>% 
+  mutate(Subgroup = case_when(
+    Sex_fromID == "Male" ~ "Male",
+    Sex_fromID == "Female" ~ "Female"
+  ),
+  Subgroup_name = "Sex")
+
+subdt_age <- dt %>% 
+  mutate(Subgroup = case_when(
+    Age_current < 60 ~ "Age <60",
+    Age_current >= 60 ~ "Age ≥60"
+  ),
+  Subgroup_name = "Age")
+
+subdt_insulin <- dt %>%
+  mutate(Subgroup = case_when(
+    use_insulin == "1" ~ "Yes",
+    use_insulin == "0" ~ "No"
+  ),
+  Subgroup_name = "Ever use of insulin")
+
+subdt_eGFR <- dt %>% 
+   mutate(Subgroup = case_when(
+    baseline_eGFR < 60 ~ "<60 mL/min/1.73m²",
+    baseline_eGFR >= 60 ~ "≥60 mL/min/1.73m²"
+  ),
+  Subgroup_name = "Baseline eGFR")
+
+subdt_long <- bind_rows(subdt_sex, subdt_age, subdt_insulin, subdt_eGFR) %>% 
+  mutate_at(vars("Subgroup_name"), ~factor(.,levels = c("Sex", "Age", "Ever use of insulin", "Baseline eGFR")))
+
+#model analysis
+lmer_results_sub <- subdt_long %>% 
+  nest_by(Subgroup_name, Subgroup) %>%
+  mutate(Results = list(lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), 
+                             REML=TRUE, data= data, weights=ipw) %>% 
+                          tidy_plus_plus(exponentiate = FALSE, add_header_rows = TRUE))) %>% 
+  dplyr::select(Subgroup_name, Subgroup, Results) %>% 
+  unnest(Results) %>% 
+  ungroup() %>% 
+  as_tibble() %>% 
+  filter(var_type == "interaction") %>% 
+  dplyr::select("Subgroup_name", "Subgroup", "label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope MID") %>% 
+  mutate(label = str_split_fixed(label,"\\*",2)[,2] %>%
+           str_remove(.," ")) %>% 
+  mutate(label = case_when(
+    label == "HVS_group" ~ "0 to 20",
+    TRUE ~ label
+  )) %>% 
+  mutate(ORCI = case_when(
+    ORCI == "NA (NA to NA)" ~ NA_character_,
+    TRUE ~ ORCI
+  )) %>% 
+  rename(`HVS category` = label)
+
+#number of patients in each exposure group
+number_sub <- subdt_long %>% 
+  nest_by(Subgroup) %>% 
+  mutate(N_distinct = list(data %>% 
+                             group_by(HVS_group) %>% 
+                             summarise(N = n_distinct(anonymousID)
+                                       ))) %>% 
+  dplyr::select(Subgroup, N_distinct) %>% 
+  unnest(N_distinct) %>% 
+  ungroup() %>% 
+  rename(`HVS category` = HVS_group) %>% 
+  dplyr::select("Subgroup",`HVS category`, "N")
+
+#combine number and lmer results
+result_sub <- left_join(x = lmer_results_sub,
+                        y = number_sub,
+                        by = c("Subgroup","HVS category"))
+
+#average slope in each exposure group stratified by subgroup
+slope_sub <- subdt_long %>% 
+  nest_by(Subgroup_name,Subgroup) %>% 
+  mutate(Results = list(lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), 
+                             REML=TRUE, data=data, weights=ipw) %>%
+                          emtrends(., specs = trt.vs.ctrlk ~ HVS_group, var = "time_year", ref=1) %>% 
+                          .$emtrends %>%
+                          summary(infer = TRUE)
+                        )) %>%
+  dplyr::select(Subgroup_name, Subgroup, Results) %>% 
+  unnest(Results) %>% 
+  ungroup() %>% 
+  as_tibble() %>% 
+  mutate(asymp.LCL = case_when(
+    is.na(asymp.LCL) ~ lower.CL,
+    TRUE ~ asymp.LCL
+  )) %>% 
+  mutate(asymp.UCL = case_when(
+    is.na(asymp.UCL) ~ upper.CL,
+    TRUE ~ asymp.UCL
+  )) %>% 
+  mutate_at(vars("time_year.trend", "asymp.LCL", "asymp.UCL"), ~sprintf("%.2f", .x)) %>% 
+  mutate(Slope = paste0(time_year.trend, " (", asymp.LCL, " to ", asymp.UCL, ")")) %>% 
+  dplyr::select( Subgroup, HVS_group, Slope) %>% 
+  rename("Slope (95% CI)" = Slope,
+         "HVS category" = "HVS_group") 
+
+#combine lmer results and average slope
+result_sub <- result_sub %>% 
+  left_join(., slope_sub, by = c("Subgroup","HVS category"))
+
+#tidy results for forest plot
+result_sub <- result_sub %>% 
+  mutate(Subgroup = paste0("   ", Subgroup)) %>% 
+  as_tibble() %>%
+  group_by(Subgroup_name) %>% 
+  group_modify(~ add_row(.,.before=0)) %>% 
+  ungroup()%>% 
+  rename("Mean difference (95% CI)" = "ORCI") 
+
+setDT(result_sub)
+result_sub[
+  is.na(Subgroup), Subgroup:=Subgroup_name
+  ][!`HVS category` %in% c("0 to 20", NA), Subgroup:=NA
+  ][`HVS category` == "0 to 20", `:=`(estimate=0, conf.low=0, conf.high=0)
+  ]
+
+write_xlsx(result_sub,file.path(pathout,"subgroup MID.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("Subgroup", "HVS category", "N", "Slope (95% CI)" , "Mean difference (95% CI)")
+  
+dt_plot <- result_sub %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.5,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout, "Subgroup MID.png"),height = 300*16, width =300*18,res= 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),#设置用于文本展示的列,在图中展示
+            mean=dt_plot$estimate,
+            lower=dt_plot$conf.low,
+            upper=dt_plot$conf.high,
+            align = c("l", "l","c","c","c"),
+            is.summary=c(T,T,F,F,F,F,F,
+                         F,F,F,F,F,
+                         T,F,F,F,F,F,
+                         F,F,F,F,F,
+                         T,F,F,F,F,F,
+                         F,F,F,F,F,
+                         T,F,F,F,F,F,
+                         F,F,F,F,F),
+            xlab= "Estimates of mean difference",
+            lineheight = 'auto',
+            line.margin =unit(3, 'mm'),
+            clip=c(-3.6, 1.5),
+            xticks = c(-3.6,-2.7,-1.7, -0.75, 0, 0.5,1.0,1.5),
+            graphwidth = unit(7, 'cm'),
+            boxsize = (1/dt_plot$std.error)/10, 
+            grid = structure(c(-0.75),
+                             gp = gpar(lty=2, col="#c08367")),
+            txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                           summary=gpar(cex=1.35, fontface='bold'),
+                           ticks=gpar(cex=1.2),
+                           xlab=gpar(cex = 1.4),
+                           title=gpar(cex = 1.35)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=0, cex=1,  colgap=unit(1,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+            graph.pos=5) 
+
+dev.off()
+```
+# sensitivity analysis---
+## adjusting HbA1c first instead of HbA1c time weighted---
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/Hba1c first"
+##ipw 
+covariate_formula <- "baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + 
+Sex_fromID + HbA1c_first + visit_perYear"
+
+ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+w1 <- weightit(ps.formula,
+               data = dt,
+               method = "ebal",
+               distribution='multinomial',
+               estimand = "ATE",
+               stabilize = TRUE)
+
+set.cobalt.options(binary = "std")
+bal.tab(w1,un = TRUE, 
+        thresholds = c(m = 0.1))
+
+dt$ipw <- w1$weights
+
+#model analysis
+lmer_results_total <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), REML=TRUE, data= dt, weights=ipw) %>% 
+  tidy_plus_plus(exponentiate = FALSE, add_header_rows = TRUE) %>% 
+  filter(var_type == "interaction") %>% 
+  dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope MID") %>% 
+  mutate(label = str_split_fixed(label,"\\*",2)[,2] %>%
+           str_remove(.," ")) %>% 
+  filter(label != "HVS_group") %>% 
+  as_tibble() %>% 
+  add_row(label="0 to 20", estimate="0", conf.low="0", conf.high="0",  .before=1) %>% 
+  rename(`HVS category` = label)
+
+#number of patients in each exposure group
+number_total <- dt %>% 
+  group_by(HVS_group) %>% 
+  summarise(N = n_distinct(anonymousID)) %>% 
+  rename(`HVS category` = HVS_group)
+
+#combine number and lmer results
+result_total <- left_join(x = lmer_results_total,
+                          y = number_total, 
+                          by= "HVS category")
+
+#tidy results for forest plot
+result_total <- result_total %>% 
+  rename("Mean difference (95% CI)" = "ORCI") 
+
+#average slope in each exposure group
+model_linear <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), REML=TRUE, data=dt, weights=ipw)
+cc_linear <- emtrends(model_linear, specs = trt.vs.ctrlk ~ HVS_group, var = "time_year", ref=1)
+slope <- cc_linear$emtrends %>% 
+  summary(infer = TRUE) %>% 
+  as.data.frame() %>% 
+  mutate_at(vars("time_year.trend", "asymp.LCL", "asymp.UCL"), ~sprintf("%.2f", .x)) %>% 
+  mutate(Slope = paste0(time_year.trend, " (", asymp.LCL, " to ", asymp.UCL, ")")) %>% 
+  dplyr::select(HVS_group, Slope) %>% 
+  rename("Slope (95% CI)" = Slope,
+         "HVS category" = "HVS_group")
+
+#combine lmer results and average slope
+result_total <- result_total %>% 
+  left_join(., slope, by="HVS category") 
+
+write_xlsx(result_total, file.path(pathout,"lmer results_HbA1c first.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("HVS category", "N", "Slope (95% CI)" , "Mean difference (95% CI)")
+  
+dt_plot <- result_total %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.5,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"MID_HbA1c first.png"), height = 300*5, width =300*10,res= 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean = dt_plot$estimate,
+            lower = dt_plot$conf.low,
+            upper = dt_plot$conf.high,
+            align = c("l", "c", "c", "c"),
+            is.summary = c(T,F,F,F,F,F),
+            graphwidth = unit(7, 'cm'),
+            #xlog = TRUE,
+            xlab = "Estimates of mean difference",
+            boxsize = (1/dt_plot$std.error)/20, 
+            lineheight = 'auto',
+            line.margin = unit(3, 'mm'),
+            clip = c(-2.5, 0.5),
+            xticks = c(-2.5, -2.0, -1.5, -0.75, 0, 0.5),
+            grid = structure(c(-0.75),
+                             gp = gpar(lty=2, col="#c08367")),
+            txt_gp=fpTxtGp(label=gpar(cex=1.1),
+                           summary=gpar(cex=1.15, fontface='bold'),
+                           ticks=gpar(cex=1.1),
+                           xlab=gpar(cex = 1.25),
+                           title=gpar(cex = 1.25)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=0, cex=0.8, colgap=unit(0.6,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
+            graph.pos=4)
+dev.off()
+```
+## population with similar measurement duration beween HbA1c and eGFR--- 
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/not excess 90 days"
+## identify study population
+dt_sensitivity <- dt %>%
+  mutate(diff_last_date = as.numeric(difftime(last_date_eGFR, last_date_HbA1c, units = "days"))) %>%
+  subset(abs(diff_last_date) <= 90) 
+
+##ipw 
+covariate_formula <- "baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + 
+Sex_fromID + Hba1c_time_weighted + visit_perYear"
+
+ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+w1 <- weightit(ps.formula,
+               data = dt_sensitivity,
+               method = "ebal",
+               distribution='multinomial',
+               estimand = "ATE",
+               stabilize = TRUE)
+
+set.cobalt.options(binary = "std")
+bal.tab(w1,un = TRUE, 
+        thresholds = c(m = 0.1))
+
+dt_sensitivity$ipw <- w1$weights
+
+#model analysis
+lmer_results_total <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), 
+                           REML=TRUE, data= dt_sensitivity, weights=ipw) %>% 
+  tidy_plus_plus(exponentiate = FALSE, add_header_rows = TRUE) %>% 
+  filter(var_type == "interaction") %>% 
+  dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope MID") %>% 
+  mutate(label = str_split_fixed(label,"\\*",2)[,2] %>%
+           str_remove(.," ")) %>% 
+  filter(label != "HVS_group") %>% 
+  as_tibble() %>% 
+  add_row(label="0 to 20", estimate="0", conf.low="0", conf.high="0",  .before=1) %>% 
+  rename(`HVS category` = label)
+
+#number of patients in each exposure group
+number_total <- dt_sensitivity %>% 
+  group_by(HVS_group) %>% 
+  summarise(N = n_distinct(anonymousID)) %>% 
+  rename(`HVS category` = HVS_group)
+
+#combine number and lmer results
+result_total <- left_join(x = lmer_results_total,
+                          y = number_total, 
+                          by= "HVS category")
+
+#tidy results for forest plot
+result_total <- result_total %>% 
+  rename("Mean difference (95% CI)" = "ORCI") 
+
+#average slope in each exposure group
+model_linear <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), 
+                     REML=TRUE, data=dt_sensitivity, weights=ipw)
+cc_linear <- emtrends(model_linear, specs = trt.vs.ctrlk ~ HVS_group, var = "time_year", ref=1)
+slope <- cc_linear$emtrends %>% 
+  summary(infer = TRUE) %>% 
+  as.data.frame() %>% 
+  mutate_at(vars("time_year.trend", "asymp.LCL", "asymp.UCL"), ~sprintf("%.2f", .x)) %>% 
+  mutate(Slope = paste0(time_year.trend, " (", asymp.LCL, " to ", asymp.UCL, ")")) %>% 
+  dplyr::select(HVS_group, Slope) %>% 
+  rename("Slope (95% CI)" = Slope,
+         "HVS category" = "HVS_group")
+
+#combine lmer results and average slope
+result_total <- result_total %>% 
+  left_join(., slope, by="HVS category") 
+
+write_xlsx(result_total, file.path(pathout,"lmer results_90 days.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("HVS category", "N", "Slope (95% CI)" , "Mean difference (95% CI)")
+  
+dt_plot <- result_total %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.5,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"MID_90 days.png"), height = 300*5, width =300*10,res= 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean = dt_plot$estimate,
+            lower = dt_plot$conf.low,
+            upper = dt_plot$conf.high,
+            align = c("l", "c", "c", "c"),
+            is.summary = c(T,F,F,F,F,F),
+            graphwidth = unit(7, 'cm'),
+            #xlog = TRUE,
+            xlab = "Estimates of mean difference",
+            boxsize = (1/dt_plot$std.error)/20, 
+            lineheight = 'auto',
+            line.margin = unit(3, 'mm'),
+            clip = c(-2.7, 0.5),
+            xticks = c(-2.7, -2.1, -1.5, -0.75, 0, 0.5),
+            grid = structure(c(-0.75),
+                             gp = gpar(lty=2, col="#c08367")),
+            txt_gp=fpTxtGp(label=gpar(cex=1.1),
+                           summary=gpar(cex=1.15, fontface='bold'),
+                           ticks=gpar(cex=1.1),
+                           xlab=gpar(cex = 1.25),
+                           title=gpar(cex = 1.25)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=0, cex=0.8, colgap=unit(0.6,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
+            graph.pos=4)
+dev.off()
+```
+## exclude baseline eGFR<30---
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/exclude eGFR 30"
+
+## select study population from dt
+dt_sensitivity <- dt %>% 
+  filter(baseline_eGFR >=30)
+
+##ipw 
+covariate_formula <- "baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + 
+Sex_fromID + Hba1c_time_weighted + visit_perYear"
+
+ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+w1 <- weightit(ps.formula,
+               data = dt_sensitivity,
+               method = "ebal",
+               distribution='multinomial',
+               estimand = "ATE",
+               stabilize = TRUE)
+
+set.cobalt.options(binary = "std")
+bal.tab(w1,un = TRUE, 
+        thresholds = c(m = 0.1))
+
+dt_sensitivity$ipw <- w1$weights
+
+#model analysis
+lmer_results_total <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), 
+                           REML=TRUE, data= dt_sensitivity, weights=ipw) %>% 
+  tidy_plus_plus(exponentiate = FALSE, add_header_rows = TRUE) %>% 
+  filter(var_type == "interaction") %>% 
+  dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope MID") %>% 
+  mutate(label = str_split_fixed(label,"\\*",2)[,2] %>%
+           str_remove(.," ")) %>% 
+  filter(label != "HVS_group") %>% 
+  as_tibble() %>% 
+  add_row(label="0 to 20", estimate="0", conf.low="0", conf.high="0",  .before=1) %>% 
+  rename(`HVS category` = label)
+
+#number of patients in each exposure group
+number_total <- dt_sensitivity %>% 
+  group_by(HVS_group) %>% 
+  summarise(N = n_distinct(anonymousID)) %>% 
+  rename(`HVS category` = HVS_group)
+
+#combine number and lmer results
+result_total <- left_join(x = lmer_results_total,
+                          y = number_total, 
+                          by= "HVS category")
+
+#tidy results for forest plot
+result_total <- result_total %>% 
+  rename("Mean difference (95% CI)" = "ORCI") 
+
+#average slope in each exposure group
+model_linear <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), 
+                     REML=TRUE, data=dt_sensitivity, weights=ipw)
+cc_linear <- emtrends(model_linear, specs = trt.vs.ctrlk ~ HVS_group, var = "time_year", ref=1)
+slope <- cc_linear$emtrends %>% 
+  summary(infer = TRUE) %>% 
+  as.data.frame() %>% 
+  mutate_at(vars("time_year.trend", "asymp.LCL", "asymp.UCL"), ~sprintf("%.2f", .x)) %>% 
+  mutate(Slope = paste0(time_year.trend, " (", asymp.LCL, " to ", asymp.UCL, ")")) %>% 
+  dplyr::select(HVS_group, Slope) %>% 
+  rename("Slope (95% CI)" = Slope,
+         "HVS category" = "HVS_group")
+
+#combine lmer results and average slope
+result_total <- result_total %>% 
+  left_join(., slope, by="HVS category") 
+
+write_xlsx(result_total, file.path(pathout,"lmer results_baseline eGFR.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("HVS category", "N", "Slope (95% CI)" , "Mean difference (95% CI)")
+  
+dt_plot <- result_total %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.5,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"MID_baseline eGFR.png"), height = 300*5, width =300*10,res= 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean = dt_plot$estimate,
+            lower = dt_plot$conf.low,
+            upper = dt_plot$conf.high,
+            align = c("l", "c", "c", "c"),
+            is.summary = c(T,F,F,F,F,F),
+            graphwidth = unit(7, 'cm'),
+            #xlog = TRUE,
+            xlab = "Estimates of mean difference",
+            boxsize = (1/dt_plot$std.error)/20, 
+            lineheight = 'auto',
+            line.margin = unit(3, 'mm'),
+            clip = c(-2.7, 0.5),
+            xticks = c(-2.7, -2.1, -1.5, -0.75, 0, 0.5),
+            grid = structure(c(-0.75),
+                             gp = gpar(lty=2, col="#c08367")),
+            txt_gp=fpTxtGp(label=gpar(cex=1.1),
+                           summary=gpar(cex=1.15, fontface='bold'),
+                           ticks=gpar(cex=1.1),
+                           xlab=gpar(cex = 1.25),
+                           title=gpar(cex = 1.25)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=0, cex=0.8, colgap=unit(0.6,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
+            graph.pos=4)
+dev.off()
+```
+## chronic slope by year
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/Chronic slope by year"
+#set study year specific !!!!!!!!!!
+years <- c(2,3,4,5)
+result_byYear <- data.frame()
+
+for(i in 1:length(years)){
+  year <- years[i] 
+  varname <- paste0(year, "-year eGFR slope")
+  
+  dt_Year <- dt %>% 
+    filter(time_year<=year) %>% 
+    group_by(anonymousID) %>% 
+    mutate(total_n_eGFR = row_number() %>% 
+             max()) %>% 
+    ungroup() %>% 
+    filter(total_n_eGFR > 1)
+    
+  #ipw 
+  covariate_formula <- "baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + 
+  Sex_fromID + Hba1c_time_weighted + visit_perYear"
+  
+  ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+  w1 <- weightit(ps.formula,
+                 data = dt_Year,
+                 method = "ebal",
+                 distribution='multinomial',
+                 estimand = "ATE",
+                 stabilize = TRUE)
+  
+  set.cobalt.options(binary = "std")
+  bal.tab(w1,un = TRUE, 
+          thresholds = c(m = 0.1))
+  
+  dt_Year$ipw <- w1$weights
+  
+  #model analysis
+  lmer_results_total <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID),
+                             REML=TRUE, data= dt_Year, weights=ipw) %>% 
+    tidy_plus_plus(exponentiate = FALSE, add_header_rows = TRUE) %>% 
+    filter(var_type == "interaction") %>% 
+    dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+    mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+    mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+           Outcome = "eGFR slope MID") %>% 
+    mutate(label = str_split_fixed(label,"\\*",2)[,2] %>%
+             str_remove(.," ")) %>% 
+    filter(label != "HVS_group") %>% 
+    as_tibble() %>% 
+    add_row(label="0 to 20", estimate="0", conf.low="0", conf.high="0",  .before=1) %>% 
+    rename(`HVS category` = label)
+  
+  #number of patients in each exposure group
+  number_total <- dt_Year %>% 
+    group_by(HVS_group) %>% 
+    summarise(N = n_distinct(anonymousID)) %>% 
+    rename(`HVS category` = HVS_group)
+  
+  #combine number and lmer results
+  result_total <- left_join(x = lmer_results_total,
+                            y = number_total, 
+                            by= "HVS category")
+  
+  #tidy results for forest plot
+  result_total <- result_total %>% 
+    rename("Mean difference (95% CI)" = "ORCI") 
+  
+  #average slope in each exposure group
+  model_linear <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), 
+                       REML=TRUE, data=dt_Year, weights=ipw)
+  cc_linear <- emtrends(model_linear, specs = trt.vs.ctrlk ~ HVS_group, var = "time_year", ref=1)
+  slope <- cc_linear$emtrends %>% 
+    summary(infer = TRUE) %>% 
+    as.data.frame() %>% 
+    mutate_at(vars("time_year.trend", "asymp.LCL", "asymp.UCL"), ~sprintf("%.2f", .x)) %>% 
+    mutate(Slope = paste0(time_year.trend, " (", asymp.LCL, " to ", asymp.UCL, ")")) %>% 
+    dplyr::select(HVS_group, Slope) %>% 
+    rename("Slope (95% CI)" = Slope,
+           "HVS category" = "HVS_group")
+  
+  #combine lmer results and average slope
+  result_total <- result_total %>% 
+    left_join(., slope, by="HVS category") %>% 
+    mutate(Outcome = NA) %>% 
+    add_row(Outcome = varname, .before = 1)
+
+   result_byYear <- rbind(result_byYear, result_total)
+}
+write_xlsx(result_byYear, file.path(pathout, "MID_byYear.xlsx"))
+```
+###forest plot for chronic slope by year---
+```{r}
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("Outcome", "HVS category", "N", "Slope (95% CI)" , "Mean difference (95% CI)")
+  
+dt_plot <- result_byYear %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.5,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"MID_byYear.png"), width = 16*300, height = 12*300, res = 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean=dt_plot$estimate,
+            lower=dt_plot$conf.low,
+            upper=dt_plot$conf.high,
+            align = c("l", "l", "c","c","c"),
+            is.summary=c(T,T,F,F,F,F,F,
+                         T,F,F,F,F,F,
+                         T,F,F,F,F,F,
+                         T,F,F,F,F,F),
+            xlab= "Estimates of mean difference",
+            lineheight = 'auto',
+            line.margin =unit(3, 'mm'),
+            clip=c(-3.8, 1.5),
+            xticks = c(-3.8,-2.6,-1.7, -0.75, 0, 0.5,1.0, 1.5),
+            graphwidth = unit(7, 'cm'),
+            boxsize = (1/dt_plot$std.error)/15, 
+            grid = structure(c(-0.75),
+                             gp = gpar(lty=2, col="#c08367")),
+            txt_gp=fpTxtGp(label=gpar(cex=1.2),
+                           summary=gpar(cex=1.35, fontface='bold'),
+                           ticks=gpar(cex=1.2),
+                           xlab=gpar(cex = 1.4),
+                           title=gpar(cex = 1.35)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=0, cex=1,  colgap=unit(1,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.2,
+            graph.pos=5) 
+
+dev.off()
+```
+## exclude patients used SGLT2 or GLP1
+```{r}
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/exclude sglt2 glp1 user"
+
+SgltGlp <- fread("SGLT_GLP.csv")
+
+## select study population from dt
+dt_sensitivity <- dt %>% 
+  filter(!anonymousID %in% SgltGlp$anonymousID)
+
+dt_sensitivity$anonymousID %>% uniqueN() # 2309 persons
+
+##ipw 
+covariate_formula <- "baseline_CKD + statins + hypertension + ASCVD +  use_insulin + ARB_ACEI + Age_current + 
+Sex_fromID + Hba1c_time_weighted + visit_perYear"
+
+ps.formula <- as.formula(paste0("HVS_group ~ ", covariate_formula))
+w1 <- weightit(ps.formula,
+               data = dt_sensitivity,
+               method = "ebal",
+               distribution='multinomial',
+               estimand = "ATE",
+               stabilize = TRUE)
+
+set.cobalt.options(binary = "std")
+bal.tab(w1,un = TRUE, 
+        thresholds = c(m = 0.1))
+
+dt_sensitivity$ipw <- w1$weights
+
+#model analysis
+lmer_results_total <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), 
+                           REML=TRUE, data= dt_sensitivity, weights=ipw) %>% 
+  tidy_plus_plus(exponentiate = FALSE, add_header_rows = TRUE) %>% 
+  filter(var_type == "interaction") %>% 
+  dplyr::select("label", "n_obs", "std.error", "estimate", "conf.low", "conf.high") %>%
+  mutate(across(all_of(c("estimate", "conf.low", "conf.high")), style_ratio)) %>%
+  mutate(ORCI = paste0(estimate," (",conf.low," to ",conf.high,")"),
+         Outcome = "eGFR slope MID") %>% 
+  mutate(label = str_split_fixed(label,"\\*",2)[,2] %>%
+           str_remove(.," ")) %>% 
+  filter(label != "HVS_group") %>% 
+  as_tibble() %>% 
+  add_row(label="0 to 20", estimate="0", conf.low="0", conf.high="0",  .before=1) %>% 
+  rename(`HVS category` = label)
+
+#number of patients in each exposure group
+number_total <- dt_sensitivity %>% 
+  group_by(HVS_group) %>% 
+  summarise(N = n_distinct(anonymousID)) %>% 
+  rename(`HVS category` = HVS_group)
+
+#combine number and lmer results
+result_total <- left_join(x = lmer_results_total,
+                          y = number_total, 
+                          by= "HVS category")
+
+#tidy results for forest plot
+result_total <- result_total %>% 
+  rename("Mean difference (95% CI)" = "ORCI") 
+
+#average slope in each exposure group
+model_linear <- lmer(eGFR_test_value ~  time_year*HVS_group + (1+time_year|anonymousID), 
+                     REML=TRUE, data=dt_sensitivity, weights=ipw)
+cc_linear <- emtrends(model_linear, specs = trt.vs.ctrlk ~ HVS_group, var = "time_year", ref=1)
+slope <- cc_linear$emtrends %>% 
+  summary(infer = TRUE) %>% 
+  as.data.frame() %>% 
+  mutate_at(vars("time_year.trend", "asymp.LCL", "asymp.UCL"), ~sprintf("%.2f", .x)) %>% 
+  mutate(Slope = paste0(time_year.trend, " (", asymp.LCL, " to ", asymp.UCL, ")")) %>% 
+  dplyr::select(HVS_group, Slope) %>% 
+  rename("Slope (95% CI)" = Slope,
+         "HVS category" = "HVS_group")
+
+#combine lmer results and average slope
+result_total <- result_total %>% 
+  left_join(., slope, by="HVS category") 
+
+write_xlsx(result_total, file.path(pathout,"lmer results_exclude sglt glp user eGFR.xlsx"))
+
+#forest plot
+library(forestplot)
+  
+num <- c("estimate", "conf.low", "conf.high")
+text <- c("HVS category", "N", "Slope (95% CI)" , "Mean difference (95% CI)")
+  
+dt_plot <- result_total %>% 
+  as_tibble() %>% 
+  rbind(names(.),.) %>% 
+  mutate_at(vars(all_of(num)), as.numeric) %>% 
+  mutate_at("std.error", as.numeric) %>%  # 1/std.error is for precision
+  mutate(std.error = case_when(
+    `HVS category` == "0 to 20" ~ 0.5,   # give a fixed size for reference group
+    TRUE ~ std.error
+  ))
+
+dt_plot$`HVS category`[dt_plot$`HVS category`=="0 to 20"] <- "0 ≤ HVS ≤ 20"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="20 to 40"] <- "20 < HVS ≤ 40"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="40 to 60"] <- "40 < HVS ≤ 60"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="60 to 80"] <- "60 < HVS ≤ 80"
+dt_plot$`HVS category`[dt_plot$`HVS category`=="80 to 100"] <- "80 < HVS ≤ 100"
+
+png(file.path(pathout,"MID_exclude sglt glp user eGFR.png"), height = 300*5, width =300*10,res= 300)
+forestplot (labeltext = as.matrix(dt_plot[,text]),
+            mean = dt_plot$estimate,
+            lower = dt_plot$conf.low,
+            upper = dt_plot$conf.high,
+            align = c("l", "c", "c", "c"),
+            is.summary = c(T,F,F,F,F,F),
+            graphwidth = unit(7, 'cm'),
+            #xlog = TRUE,
+            xlab = "Estimates of mean difference",
+            boxsize = (1/dt_plot$std.error)/20, 
+            lineheight = 'auto',
+            line.margin = unit(3, 'mm'),
+            clip = c(-2.7, 0.5),
+            xticks = c(-2.7, -2.1, -1.5, -0.75, 0, 0.5),
+            grid = structure(c(-0.75),
+                             gp = gpar(lty=2, col="#c08367")),
+            txt_gp=fpTxtGp(label=gpar(cex=1.1),
+                           summary=gpar(cex=1.15, fontface='bold'),
+                           ticks=gpar(cex=1.1),
+                           xlab=gpar(cex = 1.25),
+                           title=gpar(cex = 1.25)),
+            col=fpColors(box="#9ac3a8", lines="#8f9ecc", zero = "grey55"),
+            zero=0, cex=0.8, colgap=unit(0.6,"cm"),
+            lwd.ci=2, ci.vertices=TRUE, ci.vertices.height = 0.1,
+            graph.pos=4)
+dev.off()
+```
+
+# baseline table
+```{r}
+# baseline table ----
+pathout <- "/Users/yilingzhou/~Reaearch/HVS and eGFR slope/Data analysis/Output/main"
+
+dt_each <- dt %>% 
+  arrange(anonymousID, rank_test) %>% 
+  distinct(., anonymousID,.keep_all= TRUE) %>% 
+  mutate(followup = followup/365)
+
+dt_each %>% names() %>% dput()
+Var <- c("baseline_eGFR",  "Sex_fromID", "Hospital", "Age_current", 
+         "HbA1c_first", "Hba1c_time_weighted", "time_year","visit_perYear", "hypertension", "ASCVD", "IHD", 
+         "LDL", "HVS_group", "baseline_CKD", "ARB_ACEI", "CCB", "MRA", 
+         "venous_loop_diuretics", "oral_loop_diuretics", "use_insulin", 
+         "statins","followup")
+
+data <- dt_each  %>% 
+  select(all_of(Var)) %>% 
+  rename("Age"="Age_current",
+         "Sex"="Sex_fromID",
+         "Use of insulin"="use_insulin",
+         "Use of ARB/ACEI"= "ARB_ACEI", 
+         "Use of statins"="statins", 
+         "Use of CCB"= "CCB", 
+         "Use of MRA"="MRA", 
+         "Use of venous loop diuretics"="venous_loop_diuretics",
+         "Use of oral loop diuretics"="oral_loop_diuretics",
+         "eGFR"= 'baseline_eGFR',
+         "LDL-c" ="LDL", 
+         "Ischemic heart disease" ="IHD",
+         "Hypertension"="hypertension", 
+         "HbA1c" = "HbA1c_first",
+         "Time weighted average HbA1c" =  "Hba1c_time_weighted",
+         "Follow up" = "followup",
+         "Average number of visits per year" = "visit_perYear",
+         "HVS group"="HVS_group")
+
+all <- c("Age", "Sex", "Hospital",
+         "Follow up", 
+         "Average number of visits per year", "HbA1c","Time weighted average HbA1c", 
+         "eGFR", "baseline_CKD", 
+         "LDL-c",
+         "Hypertension", "ASCVD", "Ischemic heart disease",
+         "Use of insulin", "Use of statins","Use of ARB/ACEI", "Use of CCB", 
+         "Use of MRA", "Use of venous loop diuretics", "Use of oral loop diuretics")
+
+cate <- c("Sex", "Hospital",
+          "baseline_CKD", "Hypertension", "ASCVD", "Ischemic heart disease",
+          "Use of insulin", "Use of statins","Use of ARB/ACEI", "Use of CCB", 
+          "Use of MRA", "Use of venous loop diuretics", "Use of oral loop diuretics")
+
+unnormal <-  c("Age", "Follow up",  "Average number of visits per year", 
+               "eGFR","HbA1c","Time weighted average HbA1c", 
+               "LDL-c")
+data <- data %>% 
+  mutate_at(vars(all_of(cate)), as.character) %>% 
+  mutate_at(vars(all_of(unnormal)), as.numeric)
+
+library(tableone)
+table <- CreateTableOne(vars = all,
+                        strata = "HVS group",
+                        data= data,
+                        factorVars = cate,
+                        addOverall = TRUE)
+
+table_print <- print(table,
+                     showAllLevels=TRUE,
+                     nonnormal = unnormal,
+                     pDigits =3,
+                     catDigits=1,
+                     conDigits=1,
+                     quote=FALSE,
+                     noSpace=TRUE, 
+                     printToggle =FALSE,
+                     addOverall=TRUE)        
+write.csv(table_print, file.path(pathout,"total baseline in 5 groups.csv"))
+write.csv(data,file.path(pathout,"baseline data.csv"))
+```
+
+
